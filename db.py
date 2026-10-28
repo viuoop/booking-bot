@@ -394,3 +394,20 @@ def bookings_between(salon_id: int, start: datetime, end: datetime, master_id: i
 
 def update_booking(salon_id: int, booking_id: int, **fields) -> None:
     _update("bookings", _BOOKING_FIELDS, "salon_id=? AND id=?", (salon_id, booking_id), fields)
+
+
+# --- reminders (cross-salon reads) ---
+def salon_ids() -> list[int]:
+    return [r["id"] for r in _all("SELECT id FROM salons ORDER BY id")]
+
+
+def mark_schedule_sent(master_id: int, day: date) -> bool:
+    """True if newly recorded, False if this (master, day) was already marked."""
+    with closing(_conn()) as c, c:
+        return c.execute(
+            "INSERT OR IGNORE INTO sent_schedules (master_id, date) VALUES (?, ?)", (master_id, day.isoformat())
+        ).rowcount == 1
+
+
+def schedule_sent(master_id: int, day: date) -> bool:
+    return _one("SELECT 1 AS x FROM sent_schedules WHERE master_id=? AND date=?", (master_id, day.isoformat())) is not None
