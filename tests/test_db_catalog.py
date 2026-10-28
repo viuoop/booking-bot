@@ -90,3 +90,29 @@ def test_update_rejects_unknown_field(s):
         db.update_master(s, m, owner=2)
     with pytest.raises(ValueError):
         db.update_service(s, sv, master_id=2)
+
+
+def test_write_foreign_master_rejected(s):
+    s2 = db.create_salon(200)
+    m2 = db.add_master(s2, "Чужой")
+    db.set_hours(s2, m2, 0, "10:00", "19:00")
+    with pytest.raises(LookupError):
+        db.add_service(s, m2, "X", 30, 1)
+    with pytest.raises(LookupError):
+        db.set_hours(s, m2, 0, "08:00", "09:00")
+    with pytest.raises(LookupError):
+        db.set_hours(s, m2, 0, None, None)
+    with pytest.raises(LookupError):
+        db.add_exception(s, m2, date(2026, 11, 5), "closed")
+    assert db.hours(s2, m2) == {0: ("10:00", "19:00")}
+    assert db.hours(s, m2) == {}
+    assert db.services(s2, m2, False) == [] and db.services(s, m2, False) == []
+    assert db.exceptions(s2, m2) == [] and db.exceptions(s, m2) == []
+
+
+def test_token_unique(s):
+    a, b = db.add_master(s, "A"), db.add_master(s, "B")
+    db.update_master(s, a, link_token="t")
+    import sqlite3
+    with pytest.raises(sqlite3.IntegrityError):
+        db.update_master(s, b, link_token="t")

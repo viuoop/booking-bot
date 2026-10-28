@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS masters (
     link_token TEXT,
     active INTEGER NOT NULL DEFAULT 1
 );
+CREATE UNIQUE INDEX IF NOT EXISTS ux_masters_token ON masters(link_token) WHERE link_token IS NOT NULL;
 CREATE TABLE IF NOT EXISTS services (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     salon_id INTEGER NOT NULL REFERENCES salons(id),
@@ -89,6 +90,11 @@ def _run(sql: str, args=()) -> int:
         return c.execute(sql, args).lastrowid
 
 
+def _own(c: sqlite3.Connection, salon_id: int, master_id: int) -> None:
+    if not c.execute("SELECT 1 FROM masters WHERE id=? AND salon_id=?", (master_id, salon_id)).fetchone():
+        raise LookupError("master not in salon")
+
+
 def _all(sql: str, args=()) -> list[dict]:
     with closing(_conn()) as c:
         return [dict(r) for r in c.execute(sql, args)]
@@ -158,10 +164,12 @@ def master_by_token(token: str) -> dict | None:
 
 # --- services ---
 def add_service(salon_id: int, master_id: int, name: str, minutes: int, price: int) -> int:
-    return _run(
-        "INSERT INTO services (salon_id, master_id, name, minutes, price) VALUES (?,?,?,?,?)",
-        (salon_id, master_id, name, minutes, price),
-    )
+    with closing(_conn()) as c, c:
+        _own(c, salon_id, master_id)
+        return c.execute(
+            "INSERT INTO services (salon_id, master_id, name, minutes, price) VALUES (?,?,?,?,?)",
+            (salon_id, master_id, name, minutes, price),
+        ).lastrowid
 
 
 def services(salon_id: int, master_id: int, active_only: bool = True) -> list[dict]:
@@ -180,6 +188,7 @@ def update_service(salon_id: int, service_id: int, **fields) -> None:
 # --- hours ---
 def set_hours(salon_id: int, master_id: int, weekday: int, start: str | None, end: str | None) -> None:
     with closing(_conn()) as c, c:
+        _own(c, salon_id, master_id)
         if start is None or end is None:
             c.execute(
                 "DELETE FROM hours WHERE salon_id=? AND master_id=? AND weekday=?",
@@ -202,10 +211,12 @@ def hours(salon_id: int, master_id: int) -> dict[int, tuple[str, str]]:
 # --- exceptions ---
 def add_exception(salon_id: int, master_id: int, day: date, kind: str,
                   start: str | None = None, end: str | None = None) -> int:
-    return _run(
-        'INSERT INTO exceptions (salon_id, master_id, day, kind, start, "end") VALUES (?,?,?,?,?,?)',
-        (salon_id, master_id, day.isoformat(), kind, start, end),
-    )
+    with closing(_conn()) as c, c:
+        _own(c, salon_id, master_id)
+        return c.execute(
+            'INSERT INTO exceptions (salon_id, master_id, day, kind, start, "end") VALUES (?,?,?,?,?,?)',
+            (salon_id, master_id, day.isoformat(), kind, start, end),
+        ).lastrowid
 
 
 def exceptions(salon_id: int, master_id: int, from_day: date | None = None) -> list[dict]:
