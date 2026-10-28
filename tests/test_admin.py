@@ -20,11 +20,6 @@ def _b(i, start, name="Ира"):
     return {"id": i, "start": start, "service_name": "Стрижка", "client_name": name}
 
 
-def test_exc_can_invalidate():
-    assert admin.exc_can_invalidate("add", "closed") and admin.exc_can_invalidate("delete", "open")
-    assert not admin.exc_can_invalidate("add", "open") and not admin.exc_can_invalidate("delete", "closed")
-
-
 def test_format_affected_local_time_and_cap():
     start = datetime(2026, 7, 6, 7, 0, tzinfo=UTC)  # 10:00 Kyiv
     one = admin.format_affected([_b(1, start), _b(2, start, None)])
@@ -195,3 +190,20 @@ def test_link_and_bad_price(env):
     assert db.services(1, m) == [] and any("Не получилось" in t for t in env.texts())
     env.say(ADMIN, "500")
     assert db.services(1, m)[0]["price"] == 500
+
+
+def test_open_exception_narrowing_a_working_day_triggers_conflict(env):
+    m, day, bid = _book(1)  # booking 12:00-13:00, normal hours 10:00-18:00
+    env.press(ADMIN, admin.Act(a="exk", m=m, x=3).pack())
+    env.press(ADMIN, admin.Act(a="exd", m=m, v=day.toordinal()).pack())
+    env.say(ADMIN, "10:00-11:00")
+    assert len(db.exceptions(1, m)) == 1 and any("больше не помещаются" in t for t in env.texts())
+    env.press(ADMIN, admin.Act(a="cdo", m=m).pack())
+    assert db.get_booking(1, bid)["status"] == "cancelled"
+
+
+def test_deleting_open_exception_that_widens_day_no_conflict(env):
+    m, day, bid = _book(1)
+    eid = db.add_exception(1, m, day, "open", "10:00", "18:00")
+    env.press(ADMIN, admin.Act(a="exdel", m=m, x=eid).pack())  # deleting widens the day back: no conflict
+    assert db.exceptions(1, m) == [] and not any("больше не помещаются" in t for t in env.texts())

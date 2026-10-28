@@ -8,10 +8,9 @@ from aiogram.filters.callback_data import CallbackData
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
-    CallbackQuery, InlineKeyboardButton, KeyboardButton, Message, ReplyKeyboardMarkup,
+    CallbackQuery, KeyboardButton, Message, ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
 )
-from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 import access
 import availability
@@ -20,6 +19,7 @@ import db
 import notify
 from config import BOOKING_DAYS, TZ
 from texts import TEXTS, WEEKDAYS
+from ui import CALLBACK_ERRORS, grid, kb, msg_of, now, show
 from validators import check_text, parse_phone
 
 # Routing contract for later tasks: /start with a payload (m_<token>, Task 9) is handled by a router included
@@ -61,40 +61,12 @@ class My(CallbackData, prefix="cl_my"):
 
 _STEP_NO = {Book.master.state: 0, Book.service.state: 1, Book.day.state: 2, Book.time.state: 3, Book.confirm.state: 4}
 _CODES = ("m", "s", "d", "t")
-_ERRORS = (ValueError, OverflowError, OSError)
 
 
 # --- small helpers ---
-def _kb(rows: list[list[tuple[str, CallbackData]]]):
-    b = InlineKeyboardBuilder()
-    for row in rows:
-        b.row(*(InlineKeyboardButton(text=t, callback_data=cd.pack()) for t, cd in row))
-    return b.as_markup()
-
-
-def _grid(items: list, n: int = 4) -> list[list]:
-    return [items[i:i + n] for i in range(0, len(items), n)]
-
-
 def _tail(back: str | None) -> list[list[tuple[str, CallbackData]]]:
     row = ([(TEXTS["back"], Nav(to=back))] if back else []) + [(TEXTS["abort"], Flow(action="abort"))]
     return [row]
-
-
-def _msg(cb: CallbackQuery) -> Message | None:
-    return cb.message if isinstance(cb.message, Message) else None
-
-
-async def _show(msg: Message, text: str, rows=None, edit: bool = True) -> None:
-    kb = _kb(rows) if rows else None
-    if edit:
-        try:
-            await msg.edit_text(text, reply_markup=kb)
-            return
-        except TelegramBadRequest as e:
-            if "not modified" in str(e):
-                return
-    await msg.answer(text, reply_markup=kb)
 
 
 async def _strip(msg: Message) -> None:
@@ -108,21 +80,17 @@ def _local_day(ts: int) -> date:
     return datetime.fromtimestamp(ts, UTC).astimezone(TZ).date()
 
 
-def _now() -> datetime:
-    return datetime.now(UTC)
-
-
 # --- step renderers (each sets the FSM state it shows) ---
 async def _masters(msg: Message, state: FSMContext, sid: int, edit: bool, notice: str = "") -> None:
     ms = [m for m in db.masters(sid) if db.services(sid, m["id"])]
     if not ms:
         await state.clear()
-        await _show(msg, TEXTS["no_masters"], edit=edit)
+        await show(msg, TEXTS["no_masters"], edit=edit)
         return
     await state.set_state(Book.master)
     await state.set_data({"mode": "new"})
     rows = [[(m["name"], Pick(step="m", v=m["id"]))] for m in ms]
-    await _show(msg, (notice + "\n\n" if notice else "") + TEXTS["pick_master"], rows + _tail(None), edit)
+    await show(msg, (notice + "\n\n" if notice else "") + TEXTS["pick_master"], rows + _tail(None), edit)
 
 
 async def _services(msg: Message, state: FSMContext, sid: int, edit: bool) -> None:
@@ -134,31 +102,31 @@ async def _services(msg: Message, state: FSMContext, sid: int, edit: bool) -> No
         return
     await state.set_state(Book.service)
     rows = [[(f"{s['name']} · {s['minutes']} мин · {s['price']} грн", Pick(step="s", v=s["id"]))] for s in svcs]
-    await _show(msg, TEXTS["pick_service"], rows + _tail("m"), edit)
+    await show(msg, TEXTS["pick_service"], rows + _tail("m"), edit)
 
 
 async def _days(msg: Message, state: FSMContext, sid: int, edit: bool, notice: str = "") -> None:
     data = await state.get_data()
-    days = availability.free_days(sid, data["master_id"], data["minutes"], _now(), data.get("booking_id"))
+    days = availability.free_days(sid, data["master_id"], data["minutes"], now(), data.get("booking_id"))
     await state.set_state(Book.day)
     back = "s" if data["mode"] == "new" else None
     if not days:
-        await _show(msg, TEXTS["no_days"], _tail(back), edit)
+        await show(msg, TEXTS["no_days"], _tail(back), edit)
         return
     btns = [(f"{d:%d.%m} {WEEKDAYS[d.weekday()]}", Pick(step="d", v=d.toordinal())) for d in days]
-    await _show(msg, (notice + "\n\n" if notice else "") + TEXTS["pick_day"], _grid(btns) + _tail(back), edit)
+    await show(msg, (notice + "\n\n" if notice else "") + TEXTS["pick_day"], grid(btns) + _tail(back), edit)
 
 
 async def _times(msg: Message, state: FSMContext, sid: int, day: date, edit: bool, notice: str = "") -> None:
     data = await state.get_data()
-    slots = availability.free_slots_for(sid, data["master_id"], data["minutes"], day, _now(), data.get("booking_id"))
+    slots = availability.free_slots_for(sid, data["master_id"], data["minutes"], day, now(), data.get("booking_id"))
     if not slots:
         await _days(msg, state, sid, edit, TEXTS["slot_taken"])
         return
     await state.set_state(Book.time)
     btns = [(f"{s.astimezone(TZ):%H:%M}", Pick(step="t", v=int(s.timestamp()))) for s in slots]
     text = (notice + "\n\n" if notice else "") + TEXTS["pick_time"].format(day=f"{day:%d.%m} {WEEKDAYS[day.weekday()]}")
-    await _show(msg, text, _grid(btns) + _tail("d"), edit)
+    await show(msg, text, grid(btns) + _tail("d"), edit)
 
 
 async def _confirm(msg: Message, state: FSMContext, sid: int, uid: int, edit: bool) -> None:
@@ -171,7 +139,7 @@ async def _confirm(msg: Message, state: FSMContext, sid: int, uid: int, edit: bo
     old = db.get_booking(sid, data["booking_id"]) if move else None
     if move and old is None:
         await state.clear()
-        await _show(msg, TEXTS["booking_gone"], edit=edit)
+        await show(msg, TEXTS["booking_gone"], edit=edit)
         return
     cl = db.get_client(sid, uid) or {}
     start = datetime.fromtimestamp(data["start"], UTC)
@@ -183,7 +151,7 @@ async def _confirm(msg: Message, state: FSMContext, sid: int, uid: int, edit: bo
     head = TEXTS["summary_move"].format(old=notify.when(old)) if move else TEXTS["summary"]
     await state.set_state(Book.confirm)
     rows = [[(TEXTS["move_button" if move else "confirm_button"], Flow(action="ok"))]]
-    await _show(msg, f"{head}\n{notify.fmt_booking(preview)}", rows + _tail("t"), edit)
+    await show(msg, f"{head}\n{notify.fmt_booking(preview)}", rows + _tail("t"), edit)
 
 
 # --- /start, menu ---
@@ -192,7 +160,7 @@ async def show_menu(message: Message, state: FSMContext) -> None:
     access.salon_for(message.from_user.id)  # demo: creates the sandbox on first contact
     text = TEXTS["demo_start" if config.DEMO_MODE else "start"]
     rows = [[(TEXTS["book_button"], Menu(action="book")), (TEXTS["my_button"], Menu(action="my"))]]
-    await message.answer(text, reply_markup=_kb(rows))
+    await message.answer(text, reply_markup=kb(rows))
 
 
 @router.message(CommandStart())
@@ -209,7 +177,7 @@ async def cmd_cancel(message: Message, state: FSMContext) -> None:
 @router.callback_query(Menu.filter(F.action == "book"))
 async def cb_book(cb: CallbackQuery, state: FSMContext) -> None:
     await cb.answer()
-    if m := _msg(cb):
+    if m := msg_of(cb):
         await _masters(m, state, access.salon_for(cb.from_user.id), edit=False)
 
 
@@ -217,7 +185,7 @@ async def cb_book(cb: CallbackQuery, state: FSMContext) -> None:
 @router.callback_query(Pick.filter(F.step == "m"), Book.master)
 async def pick_master(cb: CallbackQuery, callback_data: Pick, state: FSMContext) -> None:
     await cb.answer()
-    m, sid = _msg(cb), access.salon_for(cb.from_user.id)
+    m, sid = msg_of(cb), access.salon_for(cb.from_user.id)
     master = db.get_master(sid, callback_data.v)
     if not m or not master:
         return
@@ -231,7 +199,7 @@ async def pick_master(cb: CallbackQuery, callback_data: Pick, state: FSMContext)
 @router.callback_query(Pick.filter(F.step == "s"), Book.service)
 async def pick_service(cb: CallbackQuery, callback_data: Pick, state: FSMContext) -> None:
     await cb.answer()
-    m, sid = _msg(cb), access.salon_for(cb.from_user.id)
+    m, sid = msg_of(cb), access.salon_for(cb.from_user.id)
     svc = db.get_service(sid, callback_data.v)
     data = await state.get_data()
     if not m or not svc or svc["master_id"] != data.get("master_id"):
@@ -246,12 +214,12 @@ async def pick_service(cb: CallbackQuery, callback_data: Pick, state: FSMContext
 @router.callback_query(Pick.filter(F.step == "d"), Book.day)
 async def pick_day(cb: CallbackQuery, callback_data: Pick, state: FSMContext) -> None:
     await cb.answer()
-    m, sid = _msg(cb), access.salon_for(cb.from_user.id)
+    m, sid = msg_of(cb), access.salon_for(cb.from_user.id)
     try:
         day = date.fromordinal(callback_data.v)
-    except _ERRORS:
+    except CALLBACK_ERRORS:
         return
-    today = _now().astimezone(TZ).date()
+    today = now().astimezone(TZ).date()
     if not m or not 0 <= (day - today).days < BOOKING_DAYS:
         return
     await _times(m, state, sid, day, True)
@@ -260,16 +228,16 @@ async def pick_day(cb: CallbackQuery, callback_data: Pick, state: FSMContext) ->
 @router.callback_query(Pick.filter(F.step == "t"), Book.time)
 async def pick_time(cb: CallbackQuery, callback_data: Pick, state: FSMContext) -> None:
     await cb.answer()
-    m, uid = _msg(cb), cb.from_user.id
+    m, uid = msg_of(cb), cb.from_user.id
     sid, data = access.salon_for(uid), await state.get_data()
     try:
         start = datetime.fromtimestamp(callback_data.v, UTC)
-    except _ERRORS:
+    except CALLBACK_ERRORS:
         return
     if not m or "minutes" not in data:
         return
     day = start.astimezone(TZ).date()
-    slots = availability.free_slots_for(sid, data["master_id"], data["minutes"], day, _now(), data.get("booking_id"))
+    slots = availability.free_slots_for(sid, data["master_id"], data["minutes"], day, now(), data.get("booking_id"))
     if start not in slots:
         await _times(m, state, sid, day, True, TEXTS["slot_taken"])
         return
@@ -318,7 +286,7 @@ async def on_phone(message: Message, state: FSMContext) -> None:
 @router.callback_query(Nav.filter(), StateFilter(Book))
 async def nav(cb: CallbackQuery, callback_data: Nav, state: FSMContext) -> None:
     await cb.answer()
-    m, sid = _msg(cb), access.salon_for(cb.from_user.id)
+    m, sid = msg_of(cb), access.salon_for(cb.from_user.id)
     data, cur = await state.get_data(), await state.get_state()
     to = callback_data.to
     if not m or to not in _CODES or _STEP_NO.get(cur, -1) <= _CODES.index(to) \
@@ -338,18 +306,18 @@ async def nav(cb: CallbackQuery, callback_data: Nav, state: FSMContext) -> None:
 async def flow_abort(cb: CallbackQuery, state: FSMContext) -> None:
     await cb.answer()
     await state.clear()
-    if m := _msg(cb):
-        await _show(m, TEXTS["cancelled"])
+    if m := msg_of(cb):
+        await show(m, TEXTS["cancelled"])
 
 
 @router.callback_query(Flow.filter(F.action == "ok"), Book.confirm)
 async def flow_ok(cb: CallbackQuery, state: FSMContext) -> None:
-    m, uid = _msg(cb), cb.from_user.id
+    m, uid = msg_of(cb), cb.from_user.id
     sid, data = access.salon_for(uid), await state.get_data()
     try:
         start = datetime.fromtimestamp(data["start"], UTC)
         master_id, service_id, mode = data["master_id"], data["service_id"], data["mode"]
-    except (KeyError, *_ERRORS):
+    except (KeyError, *CALLBACK_ERRORS):
         await cb.answer()
         return
     if not m:
@@ -357,10 +325,10 @@ async def flow_ok(cb: CallbackQuery, state: FSMContext) -> None:
         return
     booking_id = data.get("booking_id")
     old = db.get_booking(sid, booking_id) if mode == "move" else None
-    if mode == "move" and not (old and old["client_tg_id"] == uid and old["status"] == "active" and old["start"] > _now()):
+    if mode == "move" and not (old and old["client_tg_id"] == uid and old["status"] == "active" and old["start"] > now()):
         await cb.answer()
         await state.clear()
-        await _show(m, TEXTS["booking_gone"])
+        await show(m, TEXTS["booking_gone"])
         return
     master, svc = db.get_master(sid, master_id), db.get_service(sid, service_id)
     if not (master and master["active"] and svc and svc["active"] and svc["master_id"] == master_id
@@ -371,7 +339,7 @@ async def flow_ok(cb: CallbackQuery, state: FSMContext) -> None:
     end = start + timedelta(minutes=svc["minutes"])
     day = start.astimezone(TZ).date()
     # guard against hours/exceptions changed since the slot list was shown; db.book only checks overlaps
-    if start not in availability.free_slots_for(sid, master_id, svc["minutes"], day, _now(), booking_id):
+    if start not in availability.free_slots_for(sid, master_id, svc["minutes"], day, now(), booking_id):
         await cb.answer()
         await _times(m, state, sid, day, True, TEXTS["slot_taken"])
         return
@@ -389,7 +357,7 @@ async def flow_ok(cb: CallbackQuery, state: FSMContext) -> None:
     except LookupError:
         await cb.answer()
         if mode == "move" and not (db.get_booking(sid, booking_id) or {}).get("status") == "active":
-            await _show(m, TEXTS["booking_gone"])
+            await show(m, TEXTS["booking_gone"])
         else:
             await _masters(m, state, sid, True, TEXTS["service_gone"])
         return
@@ -401,7 +369,7 @@ async def flow_ok(cb: CallbackQuery, state: FSMContext) -> None:
         return
     await cb.answer()
     b = db.get_booking(sid, new_id)
-    await _show(m, f"{TEXTS['moved' if mode == 'move' else 'booked']}\n{notify.fmt_booking(b)}")
+    await show(m, f"{TEXTS['moved' if mode == 'move' else 'booked']}\n{notify.fmt_booking(b)}")
     await notify.booking_event(cb.bot, b, "move" if mode == "move" else "new", old=old)
 
 
@@ -410,27 +378,27 @@ async def flow_ok(cb: CallbackQuery, state: FSMContext) -> None:
 async def cb_my(cb: CallbackQuery, state: FSMContext) -> None:
     await cb.answer()
     await state.clear()
-    m = _msg(cb)
+    m = msg_of(cb)
     if not m:
         return
-    bs = db.client_bookings(access.salon_for(cb.from_user.id), cb.from_user.id, _now())
+    bs = db.client_bookings(access.salon_for(cb.from_user.id), cb.from_user.id, now())
     if not bs:
         await m.answer(TEXTS["no_bookings"])
     for b in bs:
         rows = [[(TEXTS["cancel_button"], My(action="c", id=b["id"])),
                  (TEXTS["move_open_button"], My(action="m", id=b["id"]))]]
-        await _show(m, notify.fmt_booking(b), rows, edit=False)
+        await show(m, notify.fmt_booking(b), rows, edit=False)
 
 
 def _own_future(sid: int, uid: int, booking_id: int) -> dict | None:
     b = db.get_booking(sid, booking_id)
-    ok = b and b["client_tg_id"] == uid and b["status"] == "active" and b["start"] > _now()
+    ok = b and b["client_tg_id"] == uid and b["status"] == "active" and b["start"] > now()
     return b if ok else None
 
 
 @router.callback_query(My.filter(F.action == "c"))
 async def my_cancel(cb: CallbackQuery, callback_data: My) -> None:
-    m, sid = _msg(cb), access.salon_for(cb.from_user.id)
+    m, sid = msg_of(cb), access.salon_for(cb.from_user.id)
     if not m or not _own_future(sid, cb.from_user.id, callback_data.id):
         await cb.answer()
         return
@@ -438,14 +406,14 @@ async def my_cancel(cb: CallbackQuery, callback_data: My) -> None:
     await cb.answer()
     if b is None:  # cancelled in between
         return
-    await _show(m, f"{TEXTS['you_cancelled']}\n{notify.fmt_booking(b)}")
+    await show(m, f"{TEXTS['you_cancelled']}\n{notify.fmt_booking(b)}")
     await notify.booking_event(cb.bot, b, "cancel_client")
 
 
 @router.callback_query(My.filter(F.action == "m"))
 async def my_move(cb: CallbackQuery, callback_data: My, state: FSMContext) -> None:
     await cb.answer()
-    m, sid = _msg(cb), access.salon_for(cb.from_user.id)
+    m, sid = msg_of(cb), access.salon_for(cb.from_user.id)
     b = _own_future(sid, cb.from_user.id, callback_data.id) if m else None
     if not b:
         return
