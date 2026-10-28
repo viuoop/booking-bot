@@ -170,10 +170,6 @@ def redeem_link(token: str, tg_id: int) -> dict | None:
         return {**dict(r), "tg_id": tg_id, "link_token": None}
 
 
-def master_by_token(token: str) -> dict | None:
-    return _one("SELECT * FROM masters WHERE link_token=? AND active=1", (token,))
-
-
 # --- services ---
 def add_service(salon_id: int, master_id: int, name: str, minutes: int, price: int) -> int:
     with closing(_conn()) as c, c:

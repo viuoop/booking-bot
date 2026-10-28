@@ -63,10 +63,9 @@ def test_salon_isolation(s):
 def test_link_token(s):
     m = db.add_master(s, "Анна")
     db.update_master(s, m, link_token="tok", tg_id=5)
-    assert db.master_by_token("tok")["id"] == m
     assert db.masters_by_tg(5)[0]["id"] == m
-    db.update_master(s, m, link_token=None)
-    assert db.master_by_token("tok") is None
+    assert db.redeem_link("tok", 7)["id"] == m
+    assert db.redeem_link("tok", 8) is None  # burnt
 
 
 def test_client_upsert(s):

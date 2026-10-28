@@ -18,6 +18,7 @@ def _count_salons(owner):
 
 def test_prod_single_salon(monkeypatch):
     monkeypatch.setattr(config, "DEMO_MODE", False)
+    db.ensure_salon(access.PROD_SALON)  # bot.py does this at startup
     assert access.salon_for(1) == access.salon_for(2) == 1
     assert db._all("SELECT id FROM salons") == [{"id": 1}]
 

@@ -5,7 +5,7 @@ import pytest
 from aiogram import Bot, Dispatcher
 from aiogram.client.session.base import BaseSession
 from aiogram.methods import AnswerCallbackQuery, EditMessageText, GetMe, SendDocument, SendMessage
-from aiogram.types import CallbackQuery, Chat, Message, Update, User
+from aiogram.types import CallbackQuery, Chat, InaccessibleMessage, Message, Update, User
 
 import admin
 import client
@@ -90,6 +90,11 @@ class Env:
     def press(self, uid, data):
         cb = CallbackQuery(id="1", from_user=User(id=uid, is_bot=False, first_name="u"), chat_instance="c",
                            message=_msg(uid), data=data)
+        self._feed(callback_query=cb)
+
+    def press_old(self, uid, data):  # button on a message Telegram no longer gives us (older than 48 h)
+        cb = CallbackQuery(id="1", from_user=User(id=uid, is_bot=False, first_name="u"), chat_instance="c",
+                           message=InaccessibleMessage(chat=Chat(id=uid, type="private"), message_id=1, date=0), data=data)
         self._feed(callback_query=cb)
 
     def texts(self, chat_id=None):
@@ -234,7 +239,7 @@ def test_export_and_stats_admin_only(env):
     env.say(99, "/stats")
     assert env.session.calls == []
     env.say(ADMIN, "/export")
-    assert env.texts() == ["У вас нет предстоящих записей."]
+    assert env.texts() == ["Записей пока нет."]
     _book(1)
     env.say(ADMIN, "/export")
     docs = [c for c in env.session.calls if isinstance(c, SendDocument)]
@@ -246,3 +251,11 @@ def test_export_and_stats_admin_only(env):
 def test_format_stats():
     out = admin.format_stats({"bookings": 3, "cancelled": 1, "masters": [{"name": "Анна", "bookings": 2, "hours": 1.5}]})
     assert "Записей: 3, отменено: 1" in out and "Анна: 2 записей, 1.5 ч" in out
+
+
+def test_day_list_cancel_from_stale_message_notifies_client(env):
+    _, day, bid = _book(1)
+    env.press_old(ADMIN, admin.Act(a="bx", x=bid, v=day.toordinal()).pack())
+    assert db.get_booking(1, bid)["status"] == "cancelled"
+    assert any("Запись отменена администратором" in t for t in env.texts(CLIENT))
+    assert env.texts(ADMIN)[-1] == "На этот день записей нет."  # fresh list sent instead of an edit

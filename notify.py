@@ -4,8 +4,6 @@ import access
 from config import TZ
 from texts import TEXTS, WEEKDAYS
 
-EVENTS = ("new", "cancel_client", "cancel_admin", "move")
-
 
 def when(b: dict) -> str:
     s, e = b["start"].astimezone(TZ), b["end"].astimezone(TZ)

@@ -47,6 +47,7 @@ async def cmd_link(message: Message, command: CommandObject, state: FSMContext) 
     token = command.args or ""
     if not token.startswith(PREFIX):
         raise SkipHandler
+    await state.clear()  # a link is a deliberate action: drop any half-filled booking
     m = link(message.from_user.id, token[len(PREFIX):])
     if m is None:
         await message.answer(TEXTS["m_bad_link"])

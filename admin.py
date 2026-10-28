@@ -17,7 +17,7 @@ from export import bookings_to_xlsx
 from config import BOOKING_DAYS, DURATIONS, TZ
 from texts import TEXTS as T
 from texts import WEEKDAYS
-from ui import CALLBACK_ERRORS, grid, kb, msg_of, now, show
+from ui import CALLBACK_ERRORS, grid, kb, msg_any, msg_of, now, show
 from validators import check_text, parse_hours, parse_price
 
 # Guarded router: every handler runs only for admins (checked per update). Non-admin buttons fall through to _stale.
@@ -623,6 +623,7 @@ def format_stats(st: dict) -> str:
     return "\n".join(lines)
 
 
+# shortcut: the day list is one message, may pass 4096 chars on a very busy day; paginate when a day exceeds ~40 bookings
 async def _day_list(msg: Message, sid: int, day: date, edit: bool = True) -> None:
     lo = datetime.combine(day, time.min, tzinfo=TZ)
     bs = db.bookings_between(sid, lo, datetime.combine(day + timedelta(days=1), time.min, tzinfo=TZ))
@@ -674,10 +675,10 @@ async def a_booking_cancel(cb: CallbackQuery, callback_data: Act) -> None:
     except CALLBACK_ERRORS:
         return
     done = db.cancel(sid, callback_data.x)  # None: foreign or already cancelled
-    if not done or not m:
+    if not done:
         return
-    await notify.booking_event(cb.bot, done, "cancel_admin")
-    await _day_list(m, sid, day)
+    await notify.booking_event(cb.bot, done, "cancel_admin")  # the client must hear about it even if the list is gone
+    await _day_list(m or msg_any(cb), sid, day, edit=m is not None)
 
 
 @_r.message(Command("export"))
@@ -685,7 +686,7 @@ async def cmd_export(message: Message) -> None:
     sid = access.salon_for(message.from_user.id)
     bs = db.all_bookings(sid)
     if not bs:
-        await message.answer(T["no_bookings"])
+        await message.answer(T["adm_no_bookings"])
         return
     name = f"bookings_{now().astimezone(TZ):%Y-%m-%d}.xlsx"
     await message.answer_document(BufferedInputFile(bookings_to_xlsx(bs, TZ), filename=name))

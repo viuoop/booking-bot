@@ -9,7 +9,6 @@ PROD_SALON = 1
 
 def salon_for(tg_id: int) -> int:
     if not config.DEMO_MODE:
-        db.ensure_salon(PROD_SALON)
         return PROD_SALON
     sid = db.salon_by_owner(tg_id)
     if sid is not None:

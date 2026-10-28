@@ -45,6 +45,7 @@ async def tick(bot, now: datetime) -> None:
         try:
             rows = [[(TEXTS["rem_ok_button"], My(action="ok", id=b["id"])),
                      (TEXTS["cancel_button"], My(action="c", id=b["id"]))]]
+            # shortcut: a send lost to Telegram RetryAfter is still flagged, no retry; add a retry queue if flood limits show up
             await notify.send(bot, b["client_tg_id"], f"{TEXTS[f'rem_{h}']}\n{notify.fmt_booking(b)}", kb(rows))
             db.update_booking(b["salon_id"], b["id"], **{f"reminded_{h}": 1})
         except Exception:

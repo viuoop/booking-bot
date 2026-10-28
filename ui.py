@@ -2,7 +2,7 @@ from datetime import UTC, datetime
 
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters.callback_data import CallbackData
-from aiogram.types import CallbackQuery, InlineKeyboardButton, Message
+from aiogram.types import CallbackQuery, Chat, InaccessibleMessage, InlineKeyboardButton, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 CALLBACK_ERRORS = (ValueError, OverflowError, OSError)  # bad ordinals/timestamps in callback data
@@ -23,13 +23,19 @@ def msg_of(cb: CallbackQuery) -> Message | None:
     return cb.message if isinstance(cb.message, Message) else None
 
 
+def msg_any(cb: CallbackQuery) -> Message | InaccessibleMessage:
+    """The callback's message, or a stand-in that can only be answered (old/deleted message: no editing)."""
+    return cb.message or InaccessibleMessage(
+        chat=Chat(id=cb.from_user.id, type="private"), message_id=0, date=0).as_(cb.bot)
+
+
 def now() -> datetime:
     return datetime.now(UTC)
 
 
-async def show(msg: Message, text: str, rows=None, edit: bool = True) -> None:
+async def show(msg: Message | InaccessibleMessage, text: str, rows=None, edit: bool = True) -> None:
     markup = kb(rows) if rows else None
-    if edit:
+    if edit and isinstance(msg, Message):  # InaccessibleMessage cannot be edited: send a new one
         try:
             await msg.edit_text(text, reply_markup=markup)
             return

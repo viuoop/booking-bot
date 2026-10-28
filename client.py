@@ -19,7 +19,7 @@ import db
 import notify
 from config import BOOKING_DAYS, TZ
 from texts import TEXTS, WEEKDAYS
-from ui import CALLBACK_ERRORS, grid, kb, msg_of, now, show
+from ui import CALLBACK_ERRORS, grid, kb, msg_any, msg_of, now, show
 from validators import check_text, parse_phone
 
 # /start with a payload (m_<token>) is taken by master.router, included before this one; the rest lands in cmd_start.
@@ -176,8 +176,7 @@ async def cmd_cancel(message: Message, state: FSMContext) -> None:
 @router.callback_query(Menu.filter(F.action == "book"))
 async def cb_book(cb: CallbackQuery, state: FSMContext) -> None:
     await cb.answer()
-    if m := msg_of(cb):
-        await _masters(m, state, access.salon_for(cb.from_user.id), edit=False)
+    await _masters(msg_any(cb), state, access.salon_for(cb.from_user.id), edit=False)
 
 
 # --- booking steps ---
@@ -251,7 +250,7 @@ async def pick_time(cb: CallbackQuery, callback_data: Pick, state: FSMContext) -
 
 @router.message(Book.name)
 async def on_name(message: Message, state: FSMContext) -> None:
-    name = check_text(message.text)
+    name = None if (message.text or "").startswith("/") else check_text(message.text)  # commands are not names
     if name is None:
         await message.answer(TEXTS["bad_name"])
         return
@@ -304,9 +303,10 @@ async def nav(cb: CallbackQuery, callback_data: Nav, state: FSMContext) -> None:
 @router.callback_query(Flow.filter(F.action == "abort"), StateFilter(Book))
 async def flow_abort(cb: CallbackQuery, state: FSMContext) -> None:
     await cb.answer()
+    moving = (await state.get_data()).get("mode") == "move"
     await state.clear()
     if m := msg_of(cb):
-        await show(m, TEXTS["cancelled"])
+        await show(m, TEXTS["move_aborted" if moving else "cancelled"])
 
 
 @router.callback_query(Flow.filter(F.action == "ok"), Book.confirm)
@@ -377,9 +377,8 @@ async def flow_ok(cb: CallbackQuery, state: FSMContext) -> None:
 async def cb_my(cb: CallbackQuery, state: FSMContext) -> None:
     await cb.answer()
     await state.clear()
-    m = msg_of(cb)
-    if not m:
-        return
+    m = msg_any(cb)
+    # shortcut: one message per booking, uncapped; add a cap or pagination when a client has dozens of future bookings
     bs = db.client_bookings(access.salon_for(cb.from_user.id), cb.from_user.id, now())
     if not bs:
         await m.answer(TEXTS["no_bookings"])
@@ -397,8 +396,8 @@ def _own_future(sid: int, uid: int, booking_id: int) -> dict | None:
 
 @router.callback_query(My.filter(F.action == "c"))
 async def my_cancel(cb: CallbackQuery, callback_data: My) -> None:
-    m, sid = msg_of(cb), access.salon_for(cb.from_user.id)
-    if not m or not _own_future(sid, cb.from_user.id, callback_data.id):
+    m, sid = msg_any(cb), access.salon_for(cb.from_user.id)
+    if not _own_future(sid, cb.from_user.id, callback_data.id):
         await cb.answer()
         return
     b = db.cancel(sid, callback_data.id)
@@ -411,10 +410,10 @@ async def my_cancel(cb: CallbackQuery, callback_data: My) -> None:
 
 @router.callback_query(My.filter(F.action == "ok"))
 async def my_confirm(cb: CallbackQuery, callback_data: My) -> None:
-    m, sid = msg_of(cb), access.salon_for(cb.from_user.id)
-    b = _own_future(sid, cb.from_user.id, callback_data.id) if m else None
+    m, sid = msg_any(cb), access.salon_for(cb.from_user.id)
+    b = _own_future(sid, cb.from_user.id, callback_data.id)
     await cb.answer()
-    if m and b:
+    if b:
         db.update_booking(sid, b["id"], confirmed=1)
         await show(m, f"{TEXTS['rem_confirmed']}\n{notify.fmt_booking(b)}")
 
@@ -422,8 +421,8 @@ async def my_confirm(cb: CallbackQuery, callback_data: My) -> None:
 @router.callback_query(My.filter(F.action == "m"))
 async def my_move(cb: CallbackQuery, callback_data: My, state: FSMContext) -> None:
     await cb.answer()
-    m, sid = msg_of(cb), access.salon_for(cb.from_user.id)
-    b = _own_future(sid, cb.from_user.id, callback_data.id) if m else None
+    m, sid = msg_any(cb), access.salon_for(cb.from_user.id)
+    b = _own_future(sid, cb.from_user.id, callback_data.id)
     if not b:
         return
     master, svc = db.get_master(sid, b["master_id"]), db.get_service(sid, b["service_id"])

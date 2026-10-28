@@ -7,8 +7,9 @@ from datetime import UTC, datetime, time, timedelta
 import pytest
 from aiogram import Bot, Dispatcher
 from aiogram.client.session.base import BaseSession
+from aiogram.fsm.storage.base import StorageKey
 from aiogram.methods import EditMessageText, GetMe, SendMessage
-from aiogram.types import CallbackQuery, Chat, Message, Update, User
+from aiogram.types import CallbackQuery, Chat, InaccessibleMessage, Message, Update, User
 
 import client
 import config
@@ -70,6 +71,15 @@ class Env:
         cb = CallbackQuery(id="1", from_user=User(id=uid, is_bot=False, first_name="u"), chat_instance="c",
                            message=_msg(uid), data=data)
         self._feed(callback_query=cb)
+
+    def press_old(self, uid, data):  # button on a message Telegram no longer gives us (older than 48 h)
+        cb = CallbackQuery(id="1", from_user=User(id=uid, is_bot=False, first_name="u"), chat_instance="c",
+                           message=InaccessibleMessage(chat=Chat(id=uid, type="private"), message_id=1, date=0), data=data)
+        self._feed(callback_query=cb)
+
+    def state(self, uid):
+        key = StorageKey(bot_id=self.bot.id, chat_id=uid, user_id=uid)
+        return asyncio.run(self.dp.fsm.storage.get_state(key))
 
     def texts(self, chat_id=None):
         return [c.text for c in self.session.calls if isinstance(c, (SendMessage, EditMessageText))
@@ -215,13 +225,13 @@ def test_tick_sends_reminder_with_buttons_and_sets_flag(w):
     asyncio.run(reminders.tick(bot, START - 23 * H))
     assert len(bot.sent) == 1
     chat, text, markup = bot.sent[0]
-    assert chat == CLIENT and "через сутки" in text
+    assert chat == CLIENT and "Напоминание о записи" in text
     assert [x.text for x in markup.inline_keyboard[0]] == ["Приду", "Отменить"]
     assert db.get_booking(s, b)["reminded_24"] == 1
     asyncio.run(reminders.tick(bot, START - 23 * H))
     assert len(bot.sent) == 1  # no double send
     asyncio.run(reminders.tick(bot, START - 1 * H))
-    assert len(bot.sent) == 2 and "через 2 часа" in bot.sent[1][1] and db.get_booking(s, b)["reminded_2"] == 1
+    assert len(bot.sent) == 2 and "Скоро ваша запись" in bot.sent[1][1] and db.get_booking(s, b)["reminded_2"] == 1
 
 
 def test_tick_failed_send_still_sets_flag(w):
@@ -272,3 +282,28 @@ def test_run_survives_tick_exception(monkeypatch):
     with pytest.raises(asyncio.CancelledError):
         asyncio.run(reminders.run(None))
     assert len(calls) == 2
+
+
+def test_stale_button_cancel_still_works(env):
+    bid = _future_booking()
+    env.press_old(CLIENT, My(action="c", id=bid).pack())
+    assert db.get_booking(1, bid)["status"] == "cancelled"
+    assert any("Запись отменена:" in t for t in env.texts(CLIENT))  # replied with a fresh message
+    assert any("Клиент отменил" in t for t in env.texts(MASTER))
+
+
+def test_stale_menu_buttons_reply(env):
+    _setup()
+    env.press_old(CLIENT, client.Menu(action="book").pack())
+    assert env.texts(CLIENT) == ["Выберите мастера:"]
+
+
+def test_master_link_clears_fsm_state(env):
+    m, _ = _setup(linked=False)
+    db.update_master(1, m, link_token="tokX")
+    env.say(MASTER, "/start")
+    env.press(MASTER, client.Menu(action="book").pack())
+    env.press(MASTER, client.Pick(step="m", v=m).pack())
+    assert env.state(MASTER) is not None
+    env.say(MASTER, "/start m_tokX")
+    assert env.state(MASTER) is None and db.get_master(1, m)["tg_id"] == MASTER

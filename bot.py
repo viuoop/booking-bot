@@ -3,8 +3,10 @@ import logging
 
 from aiogram import Bot, Dispatcher
 
+import access
 import admin
 import client
+import config
 import db
 import master
 import reminders
@@ -14,6 +16,8 @@ from config import BOT_TOKEN, DB_PATH
 async def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     db.init(DB_PATH)
+    if not config.DEMO_MODE:
+        db.ensure_salon(access.PROD_SALON)  # once at startup, not on every salon_for call
     bot = Bot(BOT_TOKEN)
     dp = Dispatcher()
     dp.include_router(admin.router)
