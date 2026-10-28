@@ -10,6 +10,7 @@ CREATE TABLE IF NOT EXISTS salons (
     owner_tg_id INTEGER,
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S+00:00','now'))
 );
+CREATE UNIQUE INDEX IF NOT EXISTS ux_salons_owner ON salons(owner_tg_id) WHERE owner_tg_id IS NOT NULL;
 CREATE TABLE IF NOT EXISTS masters (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     salon_id INTEGER NOT NULL REFERENCES salons(id),
