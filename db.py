@@ -68,6 +68,7 @@ CREATE TABLE IF NOT EXISTS bookings (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_bookings_master_start ON bookings(master_id, start_utc);
+CREATE INDEX IF NOT EXISTS ix_bookings_start ON bookings(start_utc);
 CREATE TABLE IF NOT EXISTS sent_schedules (
     master_id INTEGER NOT NULL REFERENCES masters(id),
     date TEXT NOT NULL,
@@ -415,3 +416,37 @@ def stats(salon_id: int, now: datetime) -> dict:
         "cancelled": len(rows) - len(act),
         "masters": [{"name": n, "bookings": b, "hours": h} for n, (b, h) in per.items()],
     }
+
+
+# --- reminders (cross-salon reads) ---
+def active_bookings_between(start: datetime, end: datetime) -> list[dict]:
+    """Active bookings of all salons starting in [start, end)."""
+    sql = _BOOKING_SQL.replace("WHERE b.salon_id=? ", "WHERE 1=1 ") + (
+        "AND b.status='active' AND b.start_utc>=? AND b.start_utc<? ORDER BY b.start_utc, b.id")
+    with closing(_conn()) as c:
+        out = []
+        for r in c.execute(sql, (_iso(start), _iso(end))):
+            d = dict(r)
+            d["start"] = datetime.fromisoformat(d.pop("start_utc"))
+            d["end"] = datetime.fromisoformat(d.pop("end_utc"))
+            out.append(d)
+        return out
+
+
+def masters_to_notify(day: date, start: datetime, end: datetime) -> list[dict]:
+    """Linked active masters with an active booking in [start, end) and no schedule sent for `day`."""
+    return _all(
+        "SELECT m.* FROM masters m WHERE m.tg_id IS NOT NULL AND m.active=1 "
+        "AND EXISTS (SELECT 1 FROM bookings b WHERE b.master_id=m.id AND b.status='active' "
+        "AND b.start_utc>=? AND b.start_utc<?) "
+        "AND NOT EXISTS (SELECT 1 FROM sent_schedules s WHERE s.master_id=m.id AND s.date=?) ORDER BY m.id",
+        (_iso(start), _iso(end), day.isoformat()),
+    )
+
+
+def mark_schedule_sent(master_id: int, day: date) -> bool:
+    """True if newly recorded, False if this (master, day) was already marked."""
+    with closing(_conn()) as c, c:
+        return c.execute(
+            "INSERT OR IGNORE INTO sent_schedules (master_id, date) VALUES (?, ?)", (master_id, day.isoformat())
+        ).rowcount == 1
