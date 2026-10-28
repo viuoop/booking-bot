@@ -22,8 +22,7 @@ from texts import TEXTS, WEEKDAYS
 from ui import CALLBACK_ERRORS, grid, kb, msg_of, now, show
 from validators import check_text, parse_phone
 
-# Routing contract for later tasks: /start with a payload (m_<token>, Task 9) is handled by a router included
-# BEFORE this one using CommandStart(deep_link=True); anything it does not take falls through to cmd_start here.
+# /start with a payload (m_<token>) is taken by master.router, included before this one; the rest lands in cmd_start.
 router = Router()
 
 
@@ -55,7 +54,7 @@ class Flow(CallbackData, prefix="cl_flow"):
 
 
 class My(CallbackData, prefix="cl_my"):
-    action: str  # c cancel | m move
+    action: str  # c cancel | m move | ok confirm (reminder button)
     id: int
 
 
@@ -165,7 +164,7 @@ async def show_menu(message: Message, state: FSMContext) -> None:
 
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext) -> None:
-    await show_menu(message, state)  # payload (e.g. m_<token>) is ignored here; Task 9 handles it earlier
+    await show_menu(message, state)  # any payload is ignored here
 
 
 @router.message(Command("cancel"))
@@ -408,6 +407,16 @@ async def my_cancel(cb: CallbackQuery, callback_data: My) -> None:
         return
     await show(m, f"{TEXTS['you_cancelled']}\n{notify.fmt_booking(b)}")
     await notify.booking_event(cb.bot, b, "cancel_client")
+
+
+@router.callback_query(My.filter(F.action == "ok"))
+async def my_confirm(cb: CallbackQuery, callback_data: My) -> None:
+    m, sid = msg_of(cb), access.salon_for(cb.from_user.id)
+    b = _own_future(sid, cb.from_user.id, callback_data.id) if m else None
+    await cb.answer()
+    if m and b:
+        db.update_booking(sid, b["id"], confirmed=1)
+        await show(m, f"{TEXTS['rem_confirmed']}\n{notify.fmt_booking(b)}")
 
 
 @router.callback_query(My.filter(F.action == "m"))
