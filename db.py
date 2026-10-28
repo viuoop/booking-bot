@@ -394,3 +394,24 @@ def bookings_between(salon_id: int, start: datetime, end: datetime, master_id: i
 
 def update_booking(salon_id: int, booking_id: int, **fields) -> None:
     _update("bookings", _BOOKING_FIELDS, "salon_id=? AND id=?", (salon_id, booking_id), fields)
+
+
+def all_bookings(salon_id: int) -> list[dict]:
+    return _read_bookings(salon_id, "ORDER BY b.start_utc, b.id")
+
+
+def stats(salon_id: int, now: datetime) -> dict:
+    """Last 7 days by start: window is [now-7d, now]."""
+    from datetime import timedelta
+    rows = bookings_between(salon_id, now - timedelta(days=7), now + timedelta(microseconds=1), active_only=False)
+    act = [r for r in rows if r["status"] == "active"]
+    per: dict[str, list] = {}
+    for r in act:
+        p = per.setdefault(r["master_name"], [0, 0.0])
+        p[0] += 1
+        p[1] += (r["end"] - r["start"]).total_seconds() / 3600
+    return {
+        "bookings": len(act),
+        "cancelled": len(rows) - len(act),
+        "masters": [{"name": n, "bookings": b, "hours": h} for n, (b, h) in per.items()],
+    }
