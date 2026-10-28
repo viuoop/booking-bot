@@ -107,4 +107,13 @@ TEXTS: dict[str, str] = {
     "adm_cancel_notify": "Отменить и уведомить клиентов",
     "adm_kept": "Записи оставлены.",
     "adm_cancelled_n": "Отменено записей: {n}.",
+    # admin bookings
+    "adm_bookings_button": "Записи",
+    "adm_pick_day": "Выберите день:",
+    "adm_no_day_bookings": "На этот день записей нет.",
+    "adm_day_head": "Записи на {day}:",
+    "adm_cancel_btn": "Отменить {time} {name}",
+    "stats_head": "Статистика за 7 дней:",
+    "stats_total": "Записей: {n}, отменено: {c}",
+    "stats_master": "{name}: {n} записей, {h:.1f} ч",
 }

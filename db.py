@@ -1,6 +1,6 @@
 import sqlite3
 from contextlib import closing, contextmanager
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 
 _path = "booking.db"
 
@@ -403,18 +403,17 @@ def all_bookings(salon_id: int) -> list[dict]:
 
 def stats(salon_id: int, now: datetime) -> dict:
     """Last 7 days by start: window is [now-7d, now]."""
-    from datetime import timedelta
     rows = bookings_between(salon_id, now - timedelta(days=7), now + timedelta(microseconds=1), active_only=False)
     act = [r for r in rows if r["status"] == "active"]
-    per: dict[str, list] = {}
+    per: dict[int, list] = {}  # by master id: same-name masters stay apart
     for r in act:
-        p = per.setdefault(r["master_name"], [0, 0.0])
-        p[0] += 1
-        p[1] += (r["end"] - r["start"]).total_seconds() / 3600
+        p = per.setdefault(r["master_id"], [r["master_name"], 0, 0.0])
+        p[1] += 1
+        p[2] += (r["end"] - r["start"]).total_seconds() / 3600
     return {
         "bookings": len(act),
         "cancelled": len(rows) - len(act),
-        "masters": [{"name": n, "bookings": b, "hours": h} for n, (b, h) in per.items()],
+        "masters": [{"name": n, "bookings": b, "hours": h} for n, b, h in per.values()],
     }
 
 

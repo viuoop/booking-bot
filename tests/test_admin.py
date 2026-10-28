@@ -4,7 +4,7 @@ from datetime import UTC, date, datetime, time, timedelta
 import pytest
 from aiogram import Bot, Dispatcher
 from aiogram.client.session.base import BaseSession
-from aiogram.methods import AnswerCallbackQuery, EditMessageText, GetMe, SendMessage
+from aiogram.methods import AnswerCallbackQuery, EditMessageText, GetMe, SendDocument, SendMessage
 from aiogram.types import CallbackQuery, Chat, Message, Update, User
 
 import admin
@@ -56,8 +56,8 @@ class Fake(BaseSession):
         self.calls.append(method)
         if isinstance(method, GetMe):
             return User(id=1, is_bot=True, first_name="b", username="salon_bot")
-        if isinstance(method, (SendMessage, EditMessageText)):
-            return _msg(getattr(method, "chat_id", ADMIN), method.text)
+        if isinstance(method, (SendMessage, EditMessageText, SendDocument)):
+            return _msg(getattr(method, "chat_id", ADMIN), getattr(method, "text", "doc"))
         return True
 
 
@@ -207,3 +207,42 @@ def test_deleting_open_exception_that_widens_day_no_conflict(env):
     eid = db.add_exception(1, m, day, "open", "10:00", "18:00")
     env.press(ADMIN, admin.Act(a="exdel", m=m, x=eid).pack())  # deleting widens the day back: no conflict
     assert db.exceptions(1, m) == [] and not any("больше не помещаются" in t for t in env.texts())
+
+
+def test_bookings_view_and_cancel(env):
+    m, day, bid = _book(1)
+    other = db.create_salon(777)
+    om = db.add_master(other, "Чужой")
+    osv = db.add_service(other, om, "Y", 60, 1)
+    st = datetime.combine(day, time(13, 0), tzinfo=TZ).astimezone(UTC)
+    foreign = db.book(other, CLIENT, om, osv, st, st + timedelta(hours=1))
+    env.press(ADMIN, admin.Act(a="bd", v=day.toordinal()).pack())
+    assert any("Анна" in t and "12:00 · Ира · +380501234567 · Стрижка" in t and "Чужой" not in t for t in env.texts())
+    env.press(ADMIN, admin.Act(a="bx", x=foreign, v=day.toordinal()).pack())
+    assert db.get_booking(other, foreign)["status"] == "active"
+    env.press(ADMIN, admin.Act(a="bx", x=bid, v=day.toordinal()).pack())
+    assert db.get_booking(1, bid)["status"] == "cancelled"
+    assert any("Запись отменена администратором" in t for t in env.texts(CLIENT))
+    assert env.texts()[-1] == "На этот день записей нет."
+    n = len(env.session.calls)
+    env.press(ADMIN, admin.Act(a="bx", x=bid, v=day.toordinal()).pack())
+    assert [type(c) for c in env.session.calls[n:]] == [AnswerCallbackQuery]
+
+
+def test_export_and_stats_admin_only(env):
+    env.say(99, "/export")
+    env.say(99, "/stats")
+    assert env.session.calls == []
+    env.say(ADMIN, "/export")
+    assert env.texts() == ["У вас нет предстоящих записей."]
+    _book(1)
+    env.say(ADMIN, "/export")
+    docs = [c for c in env.session.calls if isinstance(c, SendDocument)]
+    assert len(docs) == 1 and docs[0].document.filename.startswith("bookings_")
+    env.say(ADMIN, "/stats")
+    assert "Статистика за 7 дней" in env.texts()[-1]
+
+
+def test_format_stats():
+    out = admin.format_stats({"bookings": 3, "cancelled": 1, "masters": [{"name": "Анна", "bookings": 2, "hours": 1.5}]})
+    assert "Записей: 3, отменено: 1" in out and "Анна: 2 записей, 1.5 ч" in out

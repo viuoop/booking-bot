@@ -1,18 +1,19 @@
 import secrets
 import sqlite3
-from datetime import date, timedelta
+from datetime import date, datetime, time, timedelta
 
 from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.filters.callback_data import CallbackData
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import BufferedInputFile, CallbackQuery, Message
 
 import access
 import availability
 import db
 import notify
+from export import bookings_to_xlsx
 from config import BOOKING_DAYS, DURATIONS, TZ
 from texts import TEXTS as T
 from texts import WEEKDAYS
@@ -129,7 +130,7 @@ async def _text_ctx(message: Message, state: FSMContext, data: dict):
 
 # --- renderers ---
 async def _home(msg: Message, edit: bool = True) -> None:
-    await show(msg, T["adm_home"], [[(T["adm_masters_button"], Act(a="ml"))]], edit)
+    await show(msg, T["adm_home"], [[(T["adm_masters_button"], Act(a="ml"))], [(T["adm_bookings_button"], Act(a="bk"))]], edit)
 
 
 async def _masters_list(msg: Message, sid: int, edit: bool = True, notice: str = "") -> None:
@@ -613,6 +614,86 @@ async def a_exc_delete(cb: CallbackQuery, callback_data: Act, state: FSMContext)
     if await _conflicts(m, state, sid, master["id"], True, T["adm_saved"]):
         return
     await _exc_list(m, sid, master, notice=T["adm_saved"])
+
+
+# --- bookings, export, stats ---
+def format_stats(st: dict) -> str:
+    lines = [T["stats_head"], T["stats_total"].format(n=st["bookings"], c=st["cancelled"])]
+    lines += [T["stats_master"].format(name=m["name"], n=m["bookings"], h=m["hours"]) for m in st["masters"]]
+    return "\n".join(lines)
+
+
+async def _day_list(msg: Message, sid: int, day: date, edit: bool = True) -> None:
+    lo = datetime.combine(day, time.min, tzinfo=TZ)
+    bs = db.bookings_between(sid, lo, datetime.combine(day + timedelta(days=1), time.min, tzinfo=TZ))
+    back = [(T["back"], Act(a="bk"))]
+    if not bs:
+        await show(msg, T["adm_no_day_bookings"], [back], edit)
+        return
+    lines, rows, master = [T["adm_day_head"].format(day=_day_label(day))], [], None
+    for b in sorted(bs, key=lambda b: (b["master_name"], b["master_id"], b["start"])):
+        if b["master_id"] != master:
+            master = b["master_id"]
+            lines += ["", b["master_name"]]
+        t = f"{b['start'].astimezone(TZ):%H:%M}"
+        lines.append(f"{t} · {b['client_name'] or '-'} · {b['phone'] or '-'} · {b['service_name']}"
+                     f"{' ✅' if b['confirmed'] else ''}")
+        rows.append([(T["adm_cancel_btn"].format(time=t, name=b["client_name"] or "-"),
+                      Act(a="bx", x=b["id"], v=day.toordinal()))])
+    await show(msg, "\n".join(lines), rows + [back], edit)
+
+
+@_r.callback_query(Act.filter(F.a == "bk"))
+async def a_bookings(cb: CallbackQuery) -> None:
+    await cb.answer()
+    if m := msg_of(cb):
+        today = _today()
+        days = [today + timedelta(days=i) for i in range(BOOKING_DAYS + 1)]
+        rows = grid([(_day_label(d), Act(a="bd", v=d.toordinal())) for d in days], 3)
+        await show(m, T["adm_pick_day"], rows + [[(T["back"], Act(a="home"))]])
+
+
+@_r.callback_query(Act.filter(F.a == "bd"))
+async def a_day(cb: CallbackQuery, callback_data: Act) -> None:
+    await cb.answer()
+    m = msg_of(cb)
+    try:
+        day = date.fromordinal(callback_data.v)
+    except CALLBACK_ERRORS:
+        return
+    if m:
+        await _day_list(m, access.salon_for(cb.from_user.id), day)
+
+
+@_r.callback_query(Act.filter(F.a == "bx"))
+async def a_booking_cancel(cb: CallbackQuery, callback_data: Act) -> None:
+    await cb.answer()
+    m, sid = msg_of(cb), access.salon_for(cb.from_user.id)
+    try:
+        day = date.fromordinal(callback_data.v)
+    except CALLBACK_ERRORS:
+        return
+    done = db.cancel(sid, callback_data.x)  # None: foreign or already cancelled
+    if not done or not m:
+        return
+    await notify.booking_event(cb.bot, done, "cancel_admin")
+    await _day_list(m, sid, day)
+
+
+@_r.message(Command("export"))
+async def cmd_export(message: Message) -> None:
+    sid = access.salon_for(message.from_user.id)
+    bs = db.all_bookings(sid)
+    if not bs:
+        await message.answer(T["no_bookings"])
+        return
+    name = f"bookings_{now().astimezone(TZ):%Y-%m-%d}.xlsx"
+    await message.answer_document(BufferedInputFile(bookings_to_xlsx(bs, TZ), filename=name))
+
+
+@_r.message(Command("stats"))
+async def cmd_stats(message: Message) -> None:
+    await message.answer(format_stats(db.stats(access.salon_for(message.from_user.id), now())))
 
 
 # --- stale / foreign buttons of admins who lost access ---
