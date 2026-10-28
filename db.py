@@ -1,6 +1,6 @@
 import sqlite3
-from contextlib import closing
-from datetime import date
+from contextlib import closing, contextmanager
+from datetime import UTC, date, datetime
 
 _path = "booking.db"
 
@@ -246,3 +246,150 @@ def save_client(salon_id: int, tg_id: int, name: str, phone: str) -> None:
         "ON CONFLICT(salon_id, tg_id) DO UPDATE SET name=excluded.name, phone=excluded.phone",
         (salon_id, tg_id, name, phone),
     )
+
+
+# --- bookings ---
+class SlotTaken(Exception):
+    pass
+
+
+_BOOKING_FIELDS = {"confirmed", "reminded_24", "reminded_2"}
+_BOOKING_SQL = (
+    "SELECT b.id, b.salon_id, b.client_tg_id, b.master_id, b.service_id, b.start_utc, b.end_utc, "
+    "b.status, b.confirmed, b.reminded_24, b.reminded_2, "
+    "m.name AS master_name, m.tg_id AS master_tg_id, s.name AS service_name, s.price, "
+    "c.name AS client_name, c.phone "
+    "FROM bookings b JOIN masters m ON m.id=b.master_id JOIN services s ON s.id=b.service_id "
+    "LEFT JOIN clients c ON c.salon_id=b.salon_id AND c.tg_id=b.client_tg_id WHERE b.salon_id=? "
+)
+
+
+def _iso(dt: datetime) -> str:
+    if dt.tzinfo is None:
+        raise ValueError("naive datetime")
+    return dt.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S+00:00")  # fixed width: sortable as text
+
+
+@contextmanager
+def _tx():
+    """Own connection with explicit BEGIN IMMEDIATE: concurrent writers queue (up to timeout)."""
+    c = sqlite3.connect(_path, timeout=5, isolation_level=None)
+    c.row_factory = sqlite3.Row
+    c.execute("PRAGMA foreign_keys=ON")
+    try:
+        c.execute("BEGIN IMMEDIATE")
+        yield c
+        c.execute("COMMIT")
+    except BaseException:
+        if c.in_transaction:
+            c.execute("ROLLBACK")
+        raise
+    finally:
+        c.close()
+
+
+def _bookings(c: sqlite3.Connection, salon_id: int, where: str = "", args=()) -> list[dict]:
+    out = []
+    for r in c.execute(_BOOKING_SQL + where, (salon_id, *args)):
+        d = dict(r)
+        d["start"] = datetime.fromisoformat(d.pop("start_utc"))
+        d["end"] = datetime.fromisoformat(d.pop("end_utc"))
+        out.append(d)
+    return out
+
+
+def _check_slot(c, salon_id, master_id, service_id, start, end, exclude_id=None) -> None:
+    if not start < end:
+        raise ValueError("start must be before end")
+    if not c.execute("SELECT 1 FROM masters WHERE id=? AND salon_id=? AND active=1", (master_id, salon_id)).fetchone():
+        raise LookupError("master not available")
+    if not c.execute(
+        "SELECT 1 FROM services WHERE id=? AND salon_id=? AND master_id=? AND active=1",
+        (service_id, salon_id, master_id),
+    ).fetchone():
+        raise LookupError("service not available")
+    if c.execute(
+        "SELECT 1 FROM bookings WHERE master_id=? AND status='active' AND id IS NOT ? "
+        "AND start_utc<? AND end_utc>?",
+        (master_id, exclude_id, _iso(end), _iso(start)),
+    ).fetchone():
+        raise SlotTaken
+
+
+def _insert(c, salon_id, client_tg_id, master_id, service_id, start, end) -> int:
+    return c.execute(
+        "INSERT INTO bookings (salon_id, client_tg_id, master_id, service_id, start_utc, end_utc, created_at) "
+        "VALUES (?,?,?,?,?,?,?)",
+        (salon_id, client_tg_id, master_id, service_id, _iso(start), _iso(end), _iso(datetime.now(UTC))),
+    ).lastrowid
+
+
+def book(salon_id: int, client_tg_id: int, master_id: int, service_id: int,
+         start: datetime, end: datetime) -> int:
+    with _tx() as c:
+        _check_slot(c, salon_id, master_id, service_id, start, end)
+        return _insert(c, salon_id, client_tg_id, master_id, service_id, start, end)
+
+
+def reschedule(salon_id: int, booking_id: int, start: datetime, end: datetime) -> int:
+    with _tx() as c:
+        old = _bookings(c, salon_id, "AND b.id=? AND b.status='active'", (booking_id,))
+        if not old:
+            raise LookupError("booking not active")
+        o = old[0]
+        _check_slot(c, salon_id, o["master_id"], o["service_id"], start, end, exclude_id=booking_id)
+        new_id = _insert(c, salon_id, o["client_tg_id"], o["master_id"], o["service_id"], start, end)
+        c.execute("UPDATE bookings SET status='cancelled' WHERE id=? AND salon_id=?", (booking_id, salon_id))
+        return new_id
+
+
+def cancel(salon_id: int, booking_id: int) -> dict | None:
+    with _tx() as c:
+        rows = _bookings(c, salon_id, "AND b.id=? AND b.status='active'", (booking_id,))
+        if not rows:
+            return None
+        c.execute("UPDATE bookings SET status='cancelled' WHERE id=? AND salon_id=?", (booking_id, salon_id))
+        return {**rows[0], "status": "cancelled"}
+
+
+def _read_bookings(salon_id: int, where: str = "", args=()) -> list[dict]:
+    with closing(_conn()) as c:
+        return _bookings(c, salon_id, where, args)
+
+
+def get_booking(salon_id: int, booking_id: int) -> dict | None:
+    rows = _read_bookings(salon_id, "AND b.id=?", (booking_id,))
+    return rows[0] if rows else None
+
+
+def busy(salon_id: int, master_id: int, start: datetime, end: datetime,
+         exclude_id: int | None = None) -> list[tuple[datetime, datetime]]:
+    rows = _all(
+        "SELECT start_utc, end_utc FROM bookings WHERE salon_id=? AND master_id=? AND status='active' "
+        "AND id IS NOT ? AND start_utc<? AND end_utc>? ORDER BY start_utc",
+        (salon_id, master_id, exclude_id, _iso(end), _iso(start)),
+    )
+    return [(datetime.fromisoformat(r["start_utc"]), datetime.fromisoformat(r["end_utc"])) for r in rows]
+
+
+def client_bookings(salon_id: int, tg_id: int, now: datetime) -> list[dict]:
+    return _read_bookings(
+        salon_id, "AND b.client_tg_id=? AND b.status='active' AND b.start_utc>? ORDER BY b.start_utc",
+        (tg_id, _iso(now)),
+    )
+
+
+def bookings_between(salon_id: int, start: datetime, end: datetime, master_id: int | None = None,
+                     active_only: bool = True) -> list[dict]:
+    """Bookings starting in [start, end)."""
+    where, args = "AND b.start_utc>=? AND b.start_utc<? ", [_iso(start), _iso(end)]
+    if master_id is not None:
+        where += "AND b.master_id=? "
+        args.append(master_id)
+    if active_only:
+        where += "AND b.status='active' "
+    return _read_bookings(salon_id, where + "ORDER BY b.start_utc, b.id", tuple(args))
+
+
+def update_booking(salon_id: int, booking_id: int, **fields) -> None:
+    _update("bookings", _BOOKING_FIELDS, "salon_id=? AND id=?", (salon_id, booking_id), fields)
