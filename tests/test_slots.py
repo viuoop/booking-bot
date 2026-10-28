@@ -110,6 +110,8 @@ def test_dst_days():
     assert slots(30, hours=night, day=fall) == exp
     out = free_slots(fall, 30, night, [], [], LONG_AGO, TZ)
     assert len(set(out)) == len(out)
+    by_local = {s.astimezone(TZ).strftime("%H:%M"): s for s in out}
+    assert by_local["04:00"] - by_local["03:30"] == timedelta(minutes=90)
 
     # ordinary hours on both days: plain grid
     for d in (spring, fall):
@@ -122,3 +124,22 @@ def test_busy_touching_edges_ok():
     busy = [(loc(12).astimezone(UTC), loc(13).astimezone(UTC))]
     res = slots(30, busy=busy)
     assert "11:30" in res and "13:00" in res and "12:00" not in res
+
+
+def test_overlapping_opens_unique():
+    sunday = date(2026, 11, 8)
+    e = [exc("open", "10:00", "12:00", sunday), exc("open", "11:00", "13:00", sunday)]
+    assert slots(60, day=sunday, exc=e) == ["10:00", "10:30", "11:00", "11:30", "12:00"]
+
+
+def test_dst_gap_boundaries():
+    spring = date(2026, 3, 29)
+    end_in_gap = exc("open", "00:00", "03:30", spring)
+    assert slots(30, day=spring, exc=[end_in_gap])[-1] == "02:30"
+    start_in_gap = exc("open", "03:15", "06:00", spring)
+    assert slots(30, day=spring, exc=[start_in_gap])[0] == "04:00"
+
+
+def test_half_set_closed_hours_closes_day():
+    assert slots(30, exc=[exc("closed", "13:00", None)]) == []
+    assert slots(30, exc=[exc("closed", None, "15:00")]) == []
