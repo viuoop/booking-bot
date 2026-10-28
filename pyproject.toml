@@ -1,0 +1,19 @@
+[project]
+name = "booking-bot"
+version = "0.1.0"
+description = "Telegram-бот онлайн-записи в салон"
+requires-python = ">=3.12"
+dependencies = [
+    "aiogram>=3",
+    "openpyxl",
+    "python-dotenv",
+    "tzdata",
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]

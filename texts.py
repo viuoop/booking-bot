@@ -1,0 +1,1 @@
+TEXTS: dict[str, str] = {}
