@@ -160,6 +160,16 @@ def masters_by_tg(tg_id: int) -> list[dict]:
     return _all("SELECT * FROM masters WHERE tg_id=? AND active=1 ORDER BY id", (tg_id,))
 
 
+def redeem_link(token: str, tg_id: int) -> dict | None:
+    """Atomically bind tg_id to the master owning the token and burn it; None if unknown/used."""
+    with _tx() as c:
+        r = c.execute("SELECT * FROM masters WHERE link_token=? AND active=1", (token,)).fetchone()
+        if r is None:
+            return None
+        c.execute("UPDATE masters SET tg_id=?, link_token=NULL WHERE id=?", (tg_id, r["id"]))
+        return {**dict(r), "tg_id": tg_id, "link_token": None}
+
+
 def master_by_token(token: str) -> dict | None:
     return _one("SELECT * FROM masters WHERE link_token=? AND active=1", (token,))
 

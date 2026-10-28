@@ -47,3 +47,12 @@ async def booking_event(bot, b: dict, event: str, old: dict | None = None) -> No
         return
     for chat_id in sorted(to):
         await send(bot, chat_id, text)
+
+
+def fmt_schedule(bs: list[dict]) -> str:
+    """One line per booking: time, client, service; ✅ if the client confirmed."""
+    return "\n".join(
+        f"{b['start'].astimezone(TZ):%H:%M}-{b['end'].astimezone(TZ):%H:%M} · "
+        f"{b.get('client_name') or '-'}, {b.get('phone') or '-'} · {b['service_name']}" + (" ✅" if b["confirmed"] else "")
+        for b in bs
+    )
